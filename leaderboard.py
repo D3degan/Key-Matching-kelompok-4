@@ -1,7 +1,6 @@
 import tkinter as tk
 import db
 
-
 def show_leaderboard_window(parent):
     board = tk.Toplevel(parent)
     board.title("Leaderboard")

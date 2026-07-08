@@ -1,7 +1,7 @@
 import tkinter as tk
 import leaderboard
 import login
-
+import main as gameplay_main
 
 def show_main_menu(user_id):
     root = tk.Tk()
@@ -13,11 +13,16 @@ def show_main_menu(user_id):
     title.place(relx=0.5, y=80, anchor="center")
 
     def play_action():
-        # TODO: nanti panggil file gameplay di sini, misal:
-        # import Gameplay  (ganti sesuai nama file game kamu)
-        # root.destroy()
-        # Gameplay.start_game(user_id)
-        print("Play diklik - belum disambung ke file gameplay")
+        root.destroy()
+        
+        def back_to_main_menu():
+            show_main_menu(user_id)
+
+        app = gameplay_main.MainApplication(
+            user_id=user_id,
+            on_exit_to_menu=back_to_main_menu,
+        )
+        app.run()
 
     def leaderboard_action():
         leaderboard.show_leaderboard_window(root)
@@ -48,4 +53,4 @@ def show_main_menu(user_id):
 
 
 if __name__ == "__main__":
-    show_main_menu(1)  # testing manual, id 1 asumsi ada di DB
+    show_main_menu(1)  # testing manual

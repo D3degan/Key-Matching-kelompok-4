@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import messagebox
 import Register
 import db
 import menuutama
@@ -57,6 +58,7 @@ def show_login_window():
         conn = db.get_connection()
         if conn is None:
             status_label.config(text="database lostconn", fg="red")
+            messagebox.showerror("Database Error", "Failed to connect to the database.")
             return
 
         try:

@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import messagebox
 import db
 
 
@@ -58,6 +59,7 @@ def show_register_window(parent=None):
         conn = db.get_connection()
         if conn is None:
             status_label.config(text="database lostconn", fg="red")
+            messagebox.showerror("Database Error", "Failed to connect to the database.")
             return
 
         try:
