@@ -3,6 +3,14 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import Callable
 
+# Inisialisasi pygame mixer secara aman untuk audio yang ringan
+try:
+    import pygame
+    pygame.mixer.init()
+    PYGAME_AVAILABLE = True
+except Exception:
+    PYGAME_AVAILABLE = False
+
 # Import GameEngine untuk keperluan type hinting yang eksplisit
 from src.core import GameEngine
 
@@ -14,19 +22,27 @@ class GameplayScreen:
     """
 
     # Path absolut menuju root project, dihitung dari lokasi file ini sendiri
-    # (src/ui/gameplay_screen.py -> naik 2 folder -> root project)
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     PROJECT_ROOT = os.path.dirname(os.path.dirname(_BASE_DIR))
 
-    # Konstanta untuk manajemen path asset gambar
+    # Konstanta untuk manajemen path asset gambar dan sfx
     ASSET_ROOT = os.path.join(PROJECT_ROOT, "assets")
     DOOR_ASSET_FOLDER = "doors"
     KEY_ASSET_FOLDER = "keys"
     UI_ASSET_FOLDER = "ui"
+    SFX_ASSET_FOLDER = "sfx"
+
+    # Pemetaan nama SFX ke nama file fisik .wav demi kemudahan perawatan
+    SFX_FILES = {
+        "nbt": "nbt.wav",
+        "ubtr": "ubtr.wav",
+        "ubtff": "ubtff.wav",
+    }
 
     # Konstanta waktu untuk interaksi UI (dalam milidetik)
     COOLDOWN_DURATION = 3000
     TIMER_INTERVAL = 1000
+    TRANSITION_DELAY = 500
 
     # Konstanta ukuran window & canvas sesuai mockup (640 x 480)
     WINDOW_WIDTH = 640
@@ -62,15 +78,6 @@ class GameplayScreen:
         """Inisialisasi komponen screen, cache, menyiapkan layout Canvas, menghubungkan
 
         event handler, menampilkan keadaan awal, dan langsung memulai timer permainan.
-
-        Args:
-            master (tk.Widget): Parent widget Tkinter tempat frame utama akan
-              ditempel.
-            engine (GameEngine): Instansiasi objek logika bisnis utama permainan.
-            on_victory_callback (Callable[[int], None]): Callback eksternal saat
-              menang.
-            on_game_over_callback (Callable[[], None]): Callback eksternal saat
-              kalah.
         """
         self.master: tk.Widget = master
         self.engine: GameEngine = engine
@@ -80,18 +87,21 @@ class GameplayScreen:
         # Lifecycle tracker untuk Tkinter after() callbacks
         self.timer_id: str | None = None
         self.cooldown_id: str | None = None
+        self.transition_id: str | None = None
 
         # State internal UI untuk penanda penalti tombol unlock
         self.is_ui_locked: bool = False
 
         # Guard tambahan untuk mencegah ghost callback dari event Canvas setelah cleanup()
-        # dipanggil (Canvas tidak memiliki state DISABLED seperti Button).
         self.is_interaction_enabled: bool = True
 
         # Cache dictionary untuk menyimpan objek tk.PhotoImage di memori RAM
         self.door_cache: dict[int, tk.PhotoImage] = {}
         self.key_cache: dict[int, tk.PhotoImage] = {}
         self.ui_cache: dict[str, tk.PhotoImage] = {}
+
+        # Cache untuk objek pygame Sound
+        self.sfx_cache: dict[str, any] = {}
 
         # Deklarasi referensi widget utama
         self.main_frame: tk.Frame
@@ -107,13 +117,12 @@ class GameplayScreen:
         self.right_btn_id: int
         self.unlock_btn_id: int
 
-        # Membangun struktur interface dan memuat aset gambar ke memori RAM
+        # Membangun struktur interface dan memuat aset gambar serta suara ke memori RAM
         self.preload_all_assets()
         self.build_layout()
         self.bind_events()
 
-        # [REVISI 1] GameplayScreen bertanggung jawab penuh memastikan engine siap
-        # sebelum UI membaca state datanya, mencegah RuntimeError akibat urutan pintu kosong.
+        # GameplayScreen bertanggung jawab penuh memastikan engine siap
         self.engine.initialize_game()
 
         # Menampilkan state awal permainan setelah inisialisasi data engine dipastikan aman
@@ -125,14 +134,7 @@ class GameplayScreen:
         self.start_timer()
 
     def build_layout(self) -> None:
-        """Membangun posisi antar komponen menggunakan dua Canvas sesuai rancangan mockup
-
-        (Canvas kiri untuk pintu, Canvas kanan untuk seluruh komponen kontrol).
-
-        Seluruh komponen digambar sebagai item Canvas (create_image/create_text) agar
-
-        transparansi alpha PNG dapat ditampilkan dengan benar.
-        """
+        """Membangun posisi antar komponen menggunakan dua Canvas sesuai rancangan mockup."""
         self.main_frame = tk.Frame(
             self.master,
             width=self.WINDOW_WIDTH,
@@ -186,14 +188,14 @@ class GameplayScreen:
             anchor=self.PANEL_BG_POS["anchor"],
         )
 
-        # Layer 2: timer
+        # Layer 2: timer (Warna diubah menjadi #AE0000)
         self.timer_text_id = self.canvas_right.create_text(
             self.TIMER_POS["x"],
             self.TIMER_POS["y"],
             text="00:00",
             anchor=self.TIMER_POS["anchor"],
             font=("Helvetica", 20, "bold"),
-            fill="#1a1a1a",
+            fill="#AE0000",
         )
 
         # Layer 3: gambar kunci
@@ -232,20 +234,7 @@ class GameplayScreen:
         )
 
     def preload_all_assets(self) -> None:
-        """Membaca aset PNG satu kali berdasarkan rentang nilai dinamis yang ditentukan
-
-        oleh GameEngine, ditambah aset UI statis (background panel dan tombol),
-
-        untuk menghindari hardcoded magic numbers. Seluruh aset dimuat sebagai
-
-        tk.PhotoImage sehingga transparansi alpha PNG tetap terjaga saat digambar
-
-        pada Canvas.
-
-        Raises:
-            FileNotFoundError: Jika berkas gambar tidak ditemukan pada lokasi path.
-            tk.TclError: Jika berkas gambar korup atau tidak dapat dibaca Tkinter.
-        """
+        """Membaca aset Gambar (PNG) dan SFX (Audio WAV) satu kali ke dalam memory RAM."""
         try:
             start_id = GameEngine.MIN_KEY_ID
             end_id = GameEngine.MAX_KEY_ID + 1
@@ -265,8 +254,12 @@ class GameplayScreen:
             ui_asset_files = {
                 "rbg": "rbg.png",
                 "lbt": "lbt.png",
+                "lbt_h": "lbth.png",
                 "rbt": "rbt.png",
+                "rbt_h": "rbth.png",
                 "ubt": "ubt.png",
+                "ubt_h": "ubth.png",
+                "ubt_f": "ubtf.png",
             }
             for asset_key, filename in ui_asset_files.items():
                 ui_path = os.path.join(self.ASSET_ROOT, self.UI_ASSET_FOLDER, filename)
@@ -274,19 +267,40 @@ class GameplayScreen:
                     raise FileNotFoundError(f"Aset UI hilang: {ui_path}")
                 self.ui_cache[asset_key] = tk.PhotoImage(file=ui_path)
 
+            # Memuat aset SFX secara fleksibel menggunakan dictionary pemetaan file .wav
+            if PYGAME_AVAILABLE:
+                for sound_name, filename in self.SFX_FILES.items():
+                    sfx_path = os.path.join(
+                        self.ASSET_ROOT,
+                        self.SFX_ASSET_FOLDER,
+                        filename,
+                    )
+                    try:
+                        if os.path.exists(sfx_path):
+                            self.sfx_cache[sound_name] = pygame.mixer.Sound(sfx_path)
+                    except Exception:
+                        # Mencegah crash jika terjadi galat saat instansiasi Sound objek individual
+                        pass
+
         except (FileNotFoundError, tk.TclError) as error:
             messagebox.showerror(
                 "Error Memuat Aset",
-                f"Aplikasi gagal dimulai karena masalah pada berkas aset gambar.\n\nDetail: {error}",
+                f"Aplikasi gagal dimulai karena masalah pada berkas aset.\n\nDetail: {error}",
             )
-            # [REVISI 4] Menggunakan bare raise untuk melestarikan original stack trace/traceback asli
             raise
 
-    def bind_events(self) -> None:
-        """Menghubungkan aksi klik pada item Canvas ke method penangan masing-masing
+    def play_sfx(self, sfx_name: str) -> None:
+        """Helper method tunggal untuk memutar sound effect secara aman tanpa membuat aplikasi crash."""
+        if PYGAME_AVAILABLE and sfx_name in self.sfx_cache:
+            try:
+                self.sfx_cache[sfx_name].play()
+            except Exception:
+                # Menangkap error runtime pemutaran audio agar tidak menghentikan jalannya game
+                pass
 
-        menggunakan Canvas.tag_bind(), sebagai pengganti command Button bawaan Tkinter.
-        """
+    def bind_events(self) -> None:
+        """Menghubungkan aksi klik dan efek hover mouse pada item Canvas."""
+        # Event Klik Kiri Mouse
         self.canvas_right.tag_bind(
             self.TAG_LEFT_BTN, "<Button-1>", lambda event: self.on_left_click()
         )
@@ -297,36 +311,66 @@ class GameplayScreen:
             self.TAG_UNLOCK_BTN, "<Button-1>", lambda event: self.on_unlock_click()
         )
 
-    def update_door_image(self) -> None:
-        """Mengganti gambar pada item Canvas pintu mengambil dari cache menggunakan
+        # Event Hover Entry (<Enter>)
+        self.canvas_right.tag_bind(
+            self.TAG_LEFT_BTN, "<Enter>", lambda event: self.on_button_hover(self.left_btn_id, "lbt_h")
+        )
+        self.canvas_right.tag_bind(
+            self.TAG_RIGHT_BTN, "<Enter>", lambda event: self.on_button_hover(self.right_btn_id, "rbt_h")
+        )
+        self.canvas_right.tag_bind(
+            self.TAG_UNLOCK_BTN, "<Enter>", lambda event: self.on_unlock_hover_enter()
+        )
 
-        itemconfig(), sebagai pengganti config() pada Label.
-        """
+        # Event Hover Leave (<Leave>)
+        self.canvas_right.tag_bind(
+            self.TAG_LEFT_BTN, "<Leave>", lambda event: self.on_button_hover(self.left_btn_id, "lbt")
+        )
+        self.canvas_right.tag_bind(
+            self.TAG_RIGHT_BTN, "<Leave>", lambda event: self.on_button_hover(self.right_btn_id, "rbt")
+        )
+        self.canvas_right.tag_bind(
+            self.TAG_UNLOCK_BTN, "<Leave>", lambda event: self.on_unlock_hover_leave()
+        )
+
+    def on_button_hover(self, canvas_item_id: int, asset_key: str) -> None:
+        """Mengganti state gambar tombol saat dilewati mouse (efek hover global)."""
+        if not self.is_interaction_enabled:
+            return
+        self.canvas_right.itemconfig(canvas_item_id, image=self.ui_cache[asset_key])
+
+    def on_unlock_hover_enter(self) -> None:
+        """Mengaktifkan hover eksklusif tombol unlock hanya saat tidak dalam masa cooldown penalti."""
+        if not self.is_interaction_enabled or self.is_ui_locked:
+            return
+        self.canvas_right.itemconfig(self.unlock_btn_id, image=self.ui_cache["ubt_h"])
+
+    def on_unlock_hover_leave(self) -> None:
+        """Mengembalikan asset normal tombol unlock saat kursor menjauh (menyesuaikan status lock)."""
+        if not self.is_interaction_enabled:
+            return
+        if self.is_ui_locked:
+            self.canvas_right.itemconfig(self.unlock_btn_id, image=self.ui_cache["ubt_f"])
+        else:
+            self.canvas_right.itemconfig(self.unlock_btn_id, image=self.ui_cache["ubt"])
+
+    def update_door_image(self) -> None:
+        """Mengganti gambar pada item Canvas pintu mengambil dari cache."""
         current_door_id = self.engine.get_current_door_id()
         photo = self.door_cache[current_door_id]
-
         self.canvas_left.itemconfig(self.door_image_id, image=photo)
 
     def update_key_image(self) -> None:
-        """Mengganti gambar pada item Canvas kunci mengambil dari cache menggunakan
-
-        itemconfig(), sebagai pengganti config() pada Label.
-        """
+        """Mengganti gambar pada item Canvas kunci mengambil dari cache."""
         current_key_id = self.engine.current_key_id
         photo = self.key_cache[current_key_id]
-
         self.canvas_right.itemconfig(self.key_image_id, image=photo)
 
     def update_timer_display(self) -> None:
-        """Mengambil sisa waktu numerik dari GameEngine lalu memperbarui teks item Canvas
-
-        timer menjadi format waktu digital string MM:SS menggunakan itemconfig().
-        """
+        """Mengambil sisa waktu numerik dari GameEngine lalu memperbarui teks digital."""
         total_seconds = self.engine.remaining_time
-
         minutes = total_seconds // 60
         seconds = total_seconds % 60
-
         time_string = f"{minutes:02d}:{seconds:02d}"
         self.canvas_right.itemconfig(self.timer_text_id, text=time_string)
 
@@ -335,11 +379,7 @@ class GameplayScreen:
         self.timer_id = self.master.after(self.TIMER_INTERVAL, self.tick_timer)
 
     def tick_timer(self) -> None:
-        """Dipanggil berkala setiap 1000 ms untuk menggerakkan logika sisa waktu permainan
-
-        dan menangani kondisi interupsi penutupan window secara aman.
-        """
-        # Proteksi pencegahan exception: jika window master atau widget utama sudah hancur, hentikan siklus.
+        """Dipanggil berkala setiap 1000 ms untuk menggerakkan logika sisa waktu permainan."""
         if not self.master.winfo_exists() or not self.main_frame.winfo_exists():
             return
 
@@ -352,112 +392,73 @@ class GameplayScreen:
             self.handle_game_over()
 
     def on_left_click(self) -> None:
-        """Menangani interaksi klik pada tombol navigasi kiri untuk merotasi kunci mundur.
-
-        Pemain tetap diizinkan mengganti pilihan kunci meskipun tombol unlock sedang cooldown.
-        """
+        """Menangani interaksi klik pada tombol navigasi kiri."""
         if not self.is_interaction_enabled:
             return
-
+        self.play_sfx("nbt")
         self.engine.rotate_key_prev()
         self.update_key_image()
 
     def on_right_click(self) -> None:
-        """Menangani interaksi klik pada tombol navigasi kanan untuk merotasi kunci maju.
-
-        Pemain tetap diizinkan mengganti pilihan kunci meskipun tombol unlock sedang cooldown.
-        """
+        """Menangani interaksi klik pada tombol navigasi kanan."""
         if not self.is_interaction_enabled:
             return
-
+        self.play_sfx("nbt")
         self.engine.rotate_key_next()
         self.update_key_image()
 
     def on_unlock_click(self) -> None:
-        """Menangani validasi kecocokan kunci dengan pintu saat tombol Unlock diklik.
-
-        Memicu pergantian ruangan, pemanggilan callback kemenangan, atau penalti cooldown.
-
-        Karena tombol berbasis Canvas tidak memiliki state DISABLED seperti Button,
-
-        pemblokiran interaksi saat cooldown maupun setelah cleanup() dilakukan melalui
-
-        pengecekan flag is_ui_locked dan is_interaction_enabled pada event handler ini.
-        """
-        if not self.is_interaction_enabled:
-            return
-
-        if self.is_ui_locked:
+        """Menangani validasi kecocokan kunci dengan pintu saat tombol Unlock diklik."""
+        if not self.is_interaction_enabled or self.is_ui_locked:
             return
 
         if self.engine.is_match():
+            self.play_sfx("ubtr")
             is_game_finished = self.engine.advance_to_next_door()
-
+            
+            # Berikan penundaan 500ms non-blocking agar SFX ubtr terdengar jelas sampai selesai
             if is_game_finished:
-                self.handle_victory()
+                self.transition_id = self.master.after(self.TRANSITION_DELAY, self.handle_victory)
             else:
-                # Sesuai aturan permainan, gambar pintu diperbarui ke ruangan berikutnya,
-                # namun gambar kunci sengaja tidak di-reset agar mempertahankan pilihan terakhir pemain.
-                self.update_door_image()
+                self.transition_id = self.master.after(self.TRANSITION_DELAY, self.deferred_door_update)
         else:
+            self.play_sfx("ubtff")
             self.start_unlock_cooldown()
 
+    def deferred_door_update(self) -> None:
+        """Melakukan update pintu secara bertahap setelah penundaan animasi/sfx selesai."""
+        if not self.master.winfo_exists() or not self.main_frame.winfo_exists():
+            return
+        self.update_door_image()
+
     def start_unlock_cooldown(self) -> None:
-        """Mengaktifkan masa penalti pembatasan interaksi tombol unlock dan menjadwalkan
-
-        pembukaan kembali interface setelah durasi yang ditentukan.
-
-        Karena tombol unlock berbasis Canvas, pemblokiran klik dilakukan melalui
-
-        flag is_ui_locked yang diperiksa pada on_unlock_click(), bukan melalui state Button.
-        """
-        # Proteksi idempotensi menggunakan variabel tracking cooldown_id untuk mencegah double scheduling
+        """Mengaktifkan masa penalti pembatasan interaksi tombol unlock."""
         if self.cooldown_id is not None:
             return
 
         self.is_ui_locked = True
-
-        # Menjadwalkan pembebasan status kunci dengan Tkinter after loop
+        self.canvas_right.itemconfig(self.unlock_btn_id, image=self.ui_cache["ubt_f"])
         self.cooldown_id = self.master.after(self.COOLDOWN_DURATION, self.end_unlock_cooldown)
 
     def end_unlock_cooldown(self) -> None:
-        """Mengembalikan keadaan interface menjadi interaktif kembali dan membersihkan
-
-        tracker id callback cooldown.
-        """
+        """Mengembalikan keadaan interface menjadi interaktif kembali dan mereset tombol unlock."""
         self.is_ui_locked = False
         self.cooldown_id = None
+        self.canvas_right.itemconfig(self.unlock_btn_id, image=self.ui_cache["ubt"])
 
     def handle_victory(self) -> None:
-        """Menutup seluruh loop interaksi internal, membersihkan tracker penjadwalan,
-
-        dan melemparkan skor akhir menuju callback penanganan kemenangan eksternal.
-        """
+        """Menutup seluruh loop interaksi internal, dan melempar nilai ke callback victory."""
         self.cleanup()
         final_score = self.engine.calculate_score()
-        # [REVISI 3] Eksekusi callback eksternal; GameplayScreen siap dihancurkan dari luar (parent controller)
         self.on_victory_callback(final_score)
 
     def handle_game_over(self) -> None:
-        """Menutup seluruh loop interaksi internal, membersihkan tracker penjadwalan,
-
-        dan memicu callback penanganan kekalahan eksternal.
-        """
+        """Menutup seluruh loop interaksi internal, dan memicu callback game over."""
         self.cleanup()
-        # [REVISI 3] Eksekusi callback eksternal; GameplayScreen siap dihancurkan dari luar (parent controller)
         self.on_game_over_callback()
 
     def cleanup(self) -> None:
-        """Membatalkan seluruh antrean callback hantu (ghost callbacks) pada Tkinter loop
-
-        yang masih aktif berjalan dan mematikan seluruh interaksi Canvas secara permanen.
-
-        Karena item Canvas tidak memiliki state DISABLED seperti Button, pemblokiran
-
-        interaksi dilakukan dengan menonaktifkan flag is_interaction_enabled serta
-
-        melepas seluruh tag_bind yang masih terpasang pada tombol.
-        """
+        """Membatalkan seluruh antrean callback hantu pada Tkinter loop."""
         if self.timer_id is not None:
             self.master.after_cancel(self.timer_id)
             self.timer_id = None
@@ -466,7 +467,10 @@ class GameplayScreen:
             self.master.after_cancel(self.cooldown_id)
             self.cooldown_id = None
 
-        # [REVISI 2] Menonaktifkan interaksi kontrol saja, tidak melakukan destroy widget di sini.
+        if self.transition_id is not None:
+            self.master.after_cancel(self.transition_id)
+            self.transition_id = None
+
         self.is_interaction_enabled = False
 
         if self.canvas_right.winfo_exists():

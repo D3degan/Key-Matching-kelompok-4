@@ -2,20 +2,24 @@ import os
 import tkinter as tk
 from typing import Callable, Optional
 
+# Inisialisasi pygame mixer secara aman untuk audio yang ringan
+try:
+    import pygame
+    pygame.mixer.init()
+    PYGAME_AVAILABLE = True
+except Exception:
+    PYGAME_AVAILABLE = False
+
 
 class EndScreen:
     """Mengelola tampilan akhir permainan (menang maupun kalah) menggunakan Canvas.
 
     Class ini bersifat generik: satu implementasi dipakai untuk kedua kondisi
-
     (kemenangan dan kekalahan), dibedakan hanya melalui flag `is_victory` yang
-
     menentukan background yang ditampilkan dan apakah skor akhir ikut digambar.
 
     Class ini tidak berinteraksi dengan GameEngine maupun GameplayScreen sama
-
     sekali; seluruh data yang dibutuhkan (status menang/kalah dan skor akhir)
-
     diterima langsung melalui constructor.
     """
 
@@ -24,15 +28,23 @@ class EndScreen:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     PROJECT_ROOT = os.path.dirname(os.path.dirname(_BASE_DIR))
 
-    # Konstanta untuk manajemen path asset gambar
+    # Konstanta untuk manajemen path asset gambar dan sfx
     ASSET_ROOT = os.path.join(PROJECT_ROOT, "assets")
     UI_ASSET_FOLDER = "ui"
+    SFX_ASSET_FOLDER = "sfx"
 
-    # Nama berkas asset (tidak di-hardcode langsung di badan method)
+    # Nama berkas asset normal
     VICTORY_BG_FILE = "wbg.png"
     DEFEAT_BG_FILE = "lbg.png"
     MENU_BTN_FILE = "mbt.png"
     RETRY_BTN_FILE = "rtbt.png"
+
+    # Nama berkas asset hover baru
+    MENU_HOVER_FILE = "mbth.png"
+    RETRY_HOVER_FILE = "rtbth.png"
+
+    # Berkas efek suara klik
+    CLICK_SFX_FILE = "ubtff.wav"
 
     # Konstanta ukuran window, tetap konsisten dengan screen lain (640 x 480)
     WINDOW_WIDTH = 640
@@ -41,19 +53,21 @@ class EndScreen:
     # Konstanta posisi background (memenuhi seluruh Canvas)
     BACKGROUND_POS = {"x": 0, "y": 0, "anchor": "nw"}
 
-    # Konstanta posisi skor (tengah-atas), hanya dipakai saat menang
-    SCORE_POS = {"x": WINDOW_WIDTH // 2, "y": 110, "anchor": "center"}
+    # Konstanta posisi skor, warna diperbarui menjadi #AE0000
     SCORE_FONT = ("Helvetica", 28, "bold")
-    SCORE_TEXT_COLOR = "#1a1a1a"
+    SCORE_TEXT_COLOR = "#AE0000"
     SCORE_LABEL_TEMPLATE = "Score: {score}"
 
-    # Konstanta posisi tombol saat kondisi MENANG (skor mengambil ruang di atas)
-    RETRY_POS_VICTORY = {"x": WINDOW_WIDTH // 2, "y": 280, "anchor": "center"}
-    MENU_POS_VICTORY = {"x": WINDOW_WIDTH // 2, "y": 350, "anchor": "center"}
+    # Konstanta posisi komponen saat kondisi MENANG (Layout digeser ke kiri sekitar 30-35% window)
+    VICTORY_X_ALIGN = int(WINDOW_WIDTH * 0.33)  # Posisi horizontal di ~33% lebar layar
+    SCORE_POS_VICTORY = {"x": VICTORY_X_ALIGN, "y": 110, "anchor": "center"}
+    RETRY_POS_VICTORY = {"x": VICTORY_X_ALIGN, "y": 280, "anchor": "center"}
+    MENU_POS_VICTORY = {"x": VICTORY_X_ALIGN, "y": 350, "anchor": "center"}
 
-    # Konstanta posisi tombol saat kondisi KALAH (tanpa skor, tombol lebih ke tengah)
-    RETRY_POS_DEFEAT = {"x": WINDOW_WIDTH // 2, "y": 240, "anchor": "center"}
-    MENU_POS_DEFEAT = {"x": WINDOW_WIDTH // 2, "y": 310, "anchor": "center"}
+    # Konstanta posisi komponen saat kondisi KALAH (Mendatar di tengah sesuai posisi bawaan asli)
+    DEFEAT_X_ALIGN = WINDOW_WIDTH // 2
+    RETRY_POS_DEFEAT = {"x": DEFEAT_X_ALIGN, "y": 240, "anchor": "center"}
+    MENU_POS_DEFEAT = {"x": DEFEAT_X_ALIGN, "y": 310, "anchor": "center"}
 
     # Tag khusus untuk item Canvas interaktif (dipakai oleh tag_bind)
     TAG_RETRY_BTN = "btn_retry"
@@ -70,20 +84,7 @@ class EndScreen:
         """Inisialisasi komponen screen akhir permainan, memuat asset yang relevan,
 
         menyiapkan layout Canvas sesuai kondisi menang/kalah, serta menghubungkan
-
-        event klik tombol Retry dan Main Menu.
-
-        Args:
-            master (tk.Widget): Parent widget Tkinter tempat frame utama akan
-              ditempel.
-            is_victory (bool): True jika pemain menang, False jika kalah.
-              Menentukan background yang dipakai dan apakah skor ditampilkan.
-            score (Optional[int]): Skor akhir permainan. Wajib diisi (bukan None)
-              saat is_victory bernilai True. Diabaikan (boleh None) saat kalah.
-            on_retry_callback (Callable[[], None]): Callback eksternal yang
-              dipanggil saat tombol Retry diklik.
-            on_menu_callback (Callable[[], None]): Callback eksternal yang
-              dipanggil saat tombol Main Menu diklik.
+        event klik tombol Retry dan Main Menu beserta hover dan audio.
         """
         self.master: tk.Widget = master
         self.is_victory: bool = is_victory
@@ -97,8 +98,10 @@ class EndScreen:
         # Cache dictionary untuk menyimpan objek tk.PhotoImage di memori RAM
         self.image_cache: dict[str, tk.PhotoImage] = {}
 
-        # Deklarasi referensi widget utama, sesuai konvensi GameplayScreen agar
-        # MainApplication dapat menghancurkan screen ini dengan cara yang sama.
+        # Cache objek audio suara klik tombol
+        self.click_sound: any = None
+
+        # Deklarasi referensi widget utama
         self.main_frame: tk.Frame
         self.canvas: tk.Canvas
 
@@ -108,46 +111,62 @@ class EndScreen:
         self.retry_btn_id: int
         self.menu_btn_id: int
 
-        # Membangun struktur interface dan memuat aset gambar ke memori RAM
+        # Membangun struktur interface dan memuat aset gambar serta suara ke memori RAM
         self.preload_all_assets()
         self.build_layout()
         self.bind_events()
 
     def preload_all_assets(self) -> None:
-        """Membaca aset PNG yang relevan sesuai kondisi menang/kalah ke dalam cache.
+        """Membaca aset PNG (background, normal, dan versi hover) serta berkas audio .wav
 
-        Hanya background yang sesuai dengan `is_victory` yang dimuat, sementara
-
-        tombol Retry dan Main Menu selalu dimuat karena selalu ditampilkan pada
-
-        kedua kondisi.
-
-        Raises:
-            FileNotFoundError: Jika berkas gambar tidak ditemukan pada lokasi path.
-            tk.TclError: Jika berkas gambar korup atau tidak dapat dibaca Tkinter.
+        ke dalam memory RAM satu kali saja tanpa muat ulang dinamis.
         """
         background_file = self.VICTORY_BG_FILE if self.is_victory else self.DEFEAT_BG_FILE
 
+        # Daftar seluruh asset yang harus dipreload ke memori RAM
         asset_files = {
             "background": background_file,
-            "retry": self.RETRY_BTN_FILE,
-            "menu": self.MENU_BTN_FILE,
+            "retry_normal": self.RETRY_BTN_FILE,
+            "menu_normal": self.MENU_BTN_FILE,
+            "retry_hover": self.RETRY_HOVER_FILE,
+            "menu_hover": self.MENU_HOVER_FILE,
         }
 
-        for asset_key, filename in asset_files.items():
-            asset_path = os.path.join(self.ASSET_ROOT, self.UI_ASSET_FOLDER, filename)
-            if not os.path.exists(asset_path):
-                raise FileNotFoundError(f"Aset UI hilang: {asset_path}")
-            self.image_cache[asset_key] = tk.PhotoImage(file=asset_path)
+        try:
+            for asset_key, filename in asset_files.items():
+                asset_path = os.path.join(self.ASSET_ROOT, self.UI_ASSET_FOLDER, filename)
+                if not os.path.exists(asset_path):
+                    raise FileNotFoundError(f"Aset UI hilang: {asset_path}")
+                self.image_cache[asset_key] = tk.PhotoImage(file=asset_path)
+
+            # Memuat aset audio klik tombol secara aman
+            if PYGAME_AVAILABLE:
+                sfx_path = os.path.join(self.ASSET_ROOT, self.SFX_ASSET_FOLDER, self.CLICK_SFX_FILE)
+                try:
+                    if os.path.exists(sfx_path):
+                        self.click_sound = pygame.mixer.Sound(sfx_path)
+                except Exception:
+                    pass
+
+        except (FileNotFoundError, tk.TclError) as error:
+            messagebox.showerror(
+                "Error Memuat Aset",
+                f"Aplikasi gagal dimulai karena masalah pada berkas aset.\n\nDetail: {error}",
+            )
+            raise
+
+    def play_click_sound(self) -> None:
+        """Helper method internal untuk memutar suara klik secara aman tanpa membuat aplikasi crash."""
+        if PYGAME_AVAILABLE and self.click_sound is not None:
+            try:
+                self.click_sound.play()
+            except Exception:
+                pass
 
     def build_layout(self) -> None:
         """Membangun layout Canvas tunggal yang memenuhi seluruh window, lalu menggambar
 
-        background, skor (jika menang), serta tombol Retry dan Main Menu.
-
-        Urutan layer dari bawah ke atas: background, skor (opsional), tombol Retry,
-
-        tombol Main Menu.
+        background, skor, serta tombol Retry dan Main Menu sesuai kondisi layout state.
         """
         self.main_frame = tk.Frame(
             self.master,
@@ -174,27 +193,31 @@ class EndScreen:
             anchor=self.BACKGROUND_POS["anchor"],
         )
 
-        # Layer 2: skor akhir, hanya digambar saat kondisi menang
+        # Menentukan posisi komponen berdasarkan state kemenangan
         if self.is_victory:
+            score_pos = self.SCORE_POS_VICTORY
+            retry_pos = self.RETRY_POS_VICTORY
+            menu_pos = self.MENU_POS_VICTORY
+
+            # Layer 2: skor akhir, hanya digambar saat kondisi menang dengan warna diperbarui (#AE0000)
             score_label = self.SCORE_LABEL_TEMPLATE.format(score=self.score)
             self.score_text_id = self.canvas.create_text(
-                self.SCORE_POS["x"],
-                self.SCORE_POS["y"],
+                score_pos["x"],
+                score_pos["y"],
                 text=score_label,
-                anchor=self.SCORE_POS["anchor"],
+                anchor=score_pos["anchor"],
                 font=self.SCORE_FONT,
                 fill=self.SCORE_TEXT_COLOR,
             )
-
-        # Menentukan posisi tombol berdasarkan kondisi menang/kalah
-        retry_pos = self.RETRY_POS_VICTORY if self.is_victory else self.RETRY_POS_DEFEAT
-        menu_pos = self.MENU_POS_VICTORY if self.is_victory else self.MENU_POS_DEFEAT
+        else:
+            retry_pos = self.RETRY_POS_DEFEAT
+            menu_pos = self.MENU_POS_DEFEAT
 
         # Layer 3: tombol Retry
         self.retry_btn_id = self.canvas.create_image(
             retry_pos["x"],
             retry_pos["y"],
-            image=self.image_cache["retry"],
+            image=self.image_cache["retry_normal"],
             anchor=retry_pos["anchor"],
             tags=(self.TAG_RETRY_BTN,),
         )
@@ -203,16 +226,14 @@ class EndScreen:
         self.menu_btn_id = self.canvas.create_image(
             menu_pos["x"],
             menu_pos["y"],
-            image=self.image_cache["menu"],
+            image=self.image_cache["menu_normal"],
             anchor=menu_pos["anchor"],
             tags=(self.TAG_MENU_BTN,),
         )
 
     def bind_events(self) -> None:
-        """Menghubungkan aksi klik pada item Canvas ke method penangan masing-masing
-
-        menggunakan Canvas.tag_bind(), sebagai pengganti command Button bawaan Tkinter.
-        """
+        """Menghubungkan aksi klik dan efek hover mouse pada item Canvas."""
+        # Event Klik Kiri Mouse
         self.canvas.tag_bind(
             self.TAG_RETRY_BTN, "<Button-1>", lambda event: self.on_retry_click()
         )
@@ -220,43 +241,60 @@ class EndScreen:
             self.TAG_MENU_BTN, "<Button-1>", lambda event: self.on_menu_click()
         )
 
-    def on_retry_click(self) -> None:
-        """Menangani interaksi klik pada tombol Retry dengan memanggil callback
+        # Event Hover Entry (<Enter>) untuk mengganti aset gambar ke versi hover
+        self.canvas.tag_bind(
+            self.TAG_RETRY_BTN, "<Enter>", lambda event: self.on_button_hover(self.retry_btn_id, "retry_hover")
+        )
+        self.canvas.tag_bind(
+            self.TAG_MENU_BTN, "<Enter>", lambda event: self.on_button_hover(self.menu_btn_id, "menu_hover")
+        )
 
-        eksternal `on_retry_callback`.
+        # Event Hover Leave (<Leave>) untuk mengembalikan aset gambar ke versi normal
+        self.canvas.tag_bind(
+            self.TAG_RETRY_BTN, "<Leave>", lambda event: self.on_button_hover(self.retry_btn_id, "retry_normal")
+        )
+        self.canvas.tag_bind(
+            self.TAG_MENU_BTN, "<Leave>", lambda event: self.on_button_hover(self.menu_btn_id, "menu_normal")
+        )
+
+    def on_button_hover(self, canvas_item_id: int, cache_key: str) -> None:
+        """Mengganti state gambar tombol saat dilewati mouse (efek hover global)."""
+        if not self.is_interaction_enabled:
+            return
+        self.canvas.itemconfig(canvas_item_id, image=self.image_cache[cache_key])
+
+    def on_retry_click(self) -> None:
+        """Menangani klik tombol Retry dengan memutar sfx ubtff.wav secara langsung
+
+        diikuti pengeksekusian callback eksternal asli.
         """
         if not self.is_interaction_enabled:
             return
 
+        self.play_click_sound()
         self.on_retry_callback()
 
     def on_menu_click(self) -> None:
-        """Menangani interaksi klik pada tombol Main Menu dengan memanggil callback
+        """Menangani klik tombol Main Menu dengan memputar sfx ubtff.wav secara langsung
 
-        eksternal `on_menu_callback`.
+        diikuti pengeksekusian callback eksternal asli.
         """
         if not self.is_interaction_enabled:
             return
 
+        self.play_click_sound()
         self.on_menu_callback()
 
     def cleanup(self) -> None:
-        """Membersihkan resource dan interaksi milik EndScreen sebelum screen ini
-
-        dihancurkan oleh parent controller (MainApplication).
-
-        Saat ini EndScreen tidak memiliki timer maupun after() callback yang
-
-        berjalan, sehingga tidak ada penjadwalan yang perlu dibatalkan. Method ini
-
-        tetap disediakan agar seluruh screen (GameplayScreen, EndScreen, dst.)
-
-        memiliki interface yang konsisten dan dapat dipanggil secara seragam oleh
-
-        MainApplication tanpa perlu mengetahui detail implementasi tiap screen.
-        """
+        """Membersihkan resource dan mematikan seluruh interaksi tag_bind milik EndScreen."""
         self.is_interaction_enabled = False
 
         if self.canvas.winfo_exists():
             self.canvas.tag_unbind(self.TAG_RETRY_BTN, "<Button-1>")
             self.canvas.tag_unbind(self.TAG_MENU_BTN, "<Button-1>")
+            
+            self.canvas.tag_unbind(self.TAG_RETRY_BTN, "<Enter>")
+            self.canvas.tag_unbind(self.TAG_MENU_BTN, "<Enter>")
+            
+            self.canvas.tag_unbind(self.TAG_RETRY_BTN, "<Leave>")
+            self.canvas.tag_unbind(self.TAG_MENU_BTN, "<Leave>")

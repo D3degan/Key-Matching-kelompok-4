@@ -2,7 +2,7 @@
 Entry point tunggal buat jalanin seluruh aplikasi dari awal.
 
 Jangan run login.py, menuutama.py, atau main.py langsung satu-satu.
-Cukup run file ini aja buat mulai dari layar Login.
+run file ini aja buat mulai dari layar Login.
 
 Alur:
     play.py -> login.py (Login/Register) -> menuutama.py (Main Menu)
